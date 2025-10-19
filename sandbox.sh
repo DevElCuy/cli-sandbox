@@ -63,7 +63,7 @@ parse_arguments() {
 resolve_target_details() {
     TARGET_DIR=${SCRIPT_ARGS[0]:-.}
     ABSOLUTE_PATH=$(realpath "$TARGET_DIR")
-    DEFAULT_TAG=$(basename "$ABSOLUTE_PATH")
+    DEFAULT_TAG=$(basename "$ABSOLUTE_PATH" | tr '[:upper:]' '[:lower:]')
     CUSTOM_TAG=${SCRIPT_ARGS[1]:-}
     TAG=${CUSTOM_TAG:-$DEFAULT_TAG}
     VALID_TAG_REGEX='^[A-Za-z0-9_.-]+$'
