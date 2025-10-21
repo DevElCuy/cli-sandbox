@@ -5,6 +5,7 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cli-sandbox"
 CONFIG_FILE="$CONFIG_DIR/state.json"
 IMAGE_NAME="develcuy/cli-sandbox:latest"
 FORCE_USER_SETUP=0
+RUN_AS_ROOT=0
 
 ensure_dependencies() {
     if ! command -v jq &> /dev/null; then echo "Error: jq is not installed." >&2; exit 1; fi
@@ -33,6 +34,11 @@ parse_arguments() {
 
         if [ "$arg" = "--setup-user" ]; then
             FORCE_USER_SETUP=1
+            continue
+        fi
+
+        if [ "$arg" = "--root" ]; then
+            RUN_AS_ROOT=1
             continue
         fi
 
@@ -182,8 +188,15 @@ stage_run() {
     echo "Sandbox target: $ABSOLUTE_PATH"
     echo "Container name: $CONTAINER_NAME"
 
+    local exec_user
+    if [ "$RUN_AS_ROOT" -eq 1 ]; then
+        exec_user="root"
+    else
+        exec_user="${HOST_UID}:${HOST_GID}"
+    fi
+
     docker exec -it \
-        --user "${HOST_UID}:${HOST_GID}" \
+        --user "$exec_user" \
         --workdir /sandbox \
         "$CONTAINER_NAME" \
         bash
