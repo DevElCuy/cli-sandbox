@@ -14,6 +14,29 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# Get target username
+TARGET_USER=$(id -un "$TARGET_UID")
+if [ -z "$TARGET_USER" ]; then
+    echo "Error: Could not determine username for UID $TARGET_UID." >&2
+    exit 1
+fi
+
+# NVM and Node.js configuration
+NVM_DIR="/home/$TARGET_USER/.nvm" # NVM will be installed in the user's home directory
+NODE_VERSION="v22" # Use the same version as in the Dockerfile previously
+
+# Check if nvm is already installed for the target user
+if [ ! -d "$NVM_DIR" ]; then
+    echo "Installing nvm for user $TARGET_USER..."
+    su - "$TARGET_USER" -c "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash"
+    echo "nvm installed."
+fi
+
+# Install Node.js for the target user
+echo "Installing Node.js $NODE_VERSION for user $TARGET_USER..."
+su - "$TARGET_USER" -c "export NVM_DIR=\"$NVM_DIR\" && [ -s \"$NVM_DIR/nvm.sh\" ] && \\. \"$NVM_DIR/nvm.sh\" && nvm install $NODE_VERSION && nvm alias default $NODE_VERSION"
+echo "Node.js $NODE_VERSION installed and set as default."
+
 MARKER_DIR=/etc/cli-sandbox
 MARKER_FILE=${MARKER_DIR}/user-${TARGET_UID}.marker
 
