@@ -6,7 +6,12 @@ RUN apt-get update && apt-get install -y curl build-essential ca-certificates ti
 COPY setup-host-user.sh /usr/local/bin/setup-host-user.sh
 RUN chmod 755 /usr/local/bin/setup-host-user.sh
 
+# Create wrapper scripts for CLI tools
+RUN echo '#!/bin/bash\nexport NVM_DIR="$HOME/.nvm"\n[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"\nexec npx @google/gemini-cli "$@"' > /usr/local/bin/gemini && chmod +x /usr/local/bin/gemini
+RUN echo '#!/bin/bash\nexport NVM_DIR="$HOME/.nvm"\n[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"\nexec npx @openai/codex "$@"' > /usr/local/bin/codex && chmod +x /usr/local/bin/codex
+RUN echo '#!/bin/bash\nexport NVM_DIR="$HOME/.nvm"\n[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"\nexec npx @anthropic-ai/claude-code "$@"' > /usr/local/bin/claude && chmod +x /usr/local/bin/claude
 
+ENV TERM=xterm-256color
 
 WORKDIR /sandbox
 ENTRYPOINT ["/usr/bin/tini", "--"]

@@ -6,6 +6,11 @@ CONFIG_FILE="$CONFIG_DIR/state.json"
 IMAGE_NAME="develcuy/cli-sandbox:latest"
 FORCE_USER_SETUP=0
 RUN_AS_ROOT=0
+CONTAINER_ID=""
+TAG=""
+CONTAINER_NAME=""
+ACTUAL_CONTAINER_NAME=""
+CUSTOM_TAG_SET=0
 
 ensure_dependencies() {
     if ! command -v jq &> /dev/null; then echo "Error: jq is not installed." >&2; exit 1; fi
@@ -72,6 +77,11 @@ resolve_target_details() {
     DEFAULT_TAG=$(basename "$ABSOLUTE_PATH" | tr '[:upper:]' '[:lower:]')
     CUSTOM_TAG=${SCRIPT_ARGS[1]:-}
     TAG=${CUSTOM_TAG:-$DEFAULT_TAG}
+    if [ -n "$CUSTOM_TAG" ]; then
+        CUSTOM_TAG_SET=1
+    else
+        CUSTOM_TAG_SET=0
+    fi
     VALID_TAG_REGEX='^[A-Za-z0-9_.-]+$'
 
     if [[ ! $TAG =~ $VALID_TAG_REGEX ]]; then
@@ -98,15 +108,62 @@ load_or_create_index() {
     EXISTING_ENTRY=$(jq -r --arg path "$ABSOLUTE_PATH" '.[$path]' "$CONFIG_FILE")
 
     if [ "$EXISTING_ENTRY" != "null" ]; then
-        INDEX=$(jq -r '.index' <<< "$EXISTING_ENTRY")
+        INDEX=$(jq -r '.index // -1' <<< "$EXISTING_ENTRY")
+        STORED_HASH=$(jq -r '.hash // ""' <<< "$EXISTING_ENTRY")
+        CONTAINER_ID=$(jq -r '.container_id // ""' <<< "$EXISTING_ENTRY")
+        STORED_TAG=$(jq -r '.tag // ""' <<< "$EXISTING_ENTRY")
+        if [ -n "$STORED_TAG" ] && [ "$CUSTOM_TAG_SET" -eq 0 ]; then
+            TAG="$STORED_TAG"
+        fi
     else
         MAX_INDEX=$(jq -r --arg hash "$HASH" '[.[] | select(.hash == $hash) | .index] | max // -1' "$CONFIG_FILE")
         INDEX=$((MAX_INDEX + 1))
-        jq --arg path "$ABSOLUTE_PATH" --arg hash "$HASH" --argjson index "$INDEX" \
-           '.[$path] = {hash: $hash, index: $index}' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        STORED_HASH=""
+        CONTAINER_ID=""
+    fi
+
+    if [ "$INDEX" -lt 0 ] || [ "$STORED_HASH" != "$HASH" ]; then
+        MAX_INDEX=$(jq -r --arg hash "$HASH" '[.[] | select(.hash == $hash) | .index] | max // -1' "$CONFIG_FILE")
+        INDEX=$((MAX_INDEX + 1))
+        CONTAINER_ID=""
+        if ! persist_container_metadata ""; then
+            return 1
+        fi
     fi
 
     CONTAINER_NAME="${TAG}-${HASH}-${INDEX}"
+}
+
+refresh_container_name() {
+    if [ -z "$CONTAINER_ID" ]; then
+        ACTUAL_CONTAINER_NAME=""
+        return
+    fi
+
+    local inspected_name
+    if inspected_name=$(docker inspect --format '{{ .Name }}' "$CONTAINER_ID" 2>/dev/null); then
+        ACTUAL_CONTAINER_NAME="${inspected_name#/}"
+    else
+        ACTUAL_CONTAINER_NAME=""
+    fi
+}
+
+persist_container_metadata() {
+    local container_id_value="${1:-}"
+    if ! jq --arg path "$ABSOLUTE_PATH" \
+             --arg hash "$HASH" \
+             --argjson index "$INDEX" \
+             --arg tag "$TAG" \
+             --arg container_id "$container_id_value" \
+             '.[$path] = {hash: $hash, index: $index, tag: $tag} + (if $container_id == "" then {} else {container_id: $container_id} end)' \
+             "$CONFIG_FILE" > "$CONFIG_FILE.tmp"; then
+        echo "Error: failed to update sandbox state for '$ABSOLUTE_PATH'." >&2
+        return 1
+    fi
+    if ! mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"; then
+        echo "Error: failed to persist sandbox state for '$ABSOLUTE_PATH'." >&2
+        return 1
+    fi
 }
 
 stage_setup() {
@@ -122,52 +179,81 @@ stage_setup() {
     fi
 
     # 2. Ensure container exists and is running
-    local container_running
-    container_running=$(docker ps -q -f "name=^/${CONTAINER_NAME}$")
     local container_created=0
-
-    if [ -z "$container_running" ]; then
-        local container_exists
-        container_exists=$(docker ps -aq -f "name=^/${CONTAINER_NAME}$")
-
-        if [ -z "$container_exists" ]; then
-            # Container doesn't exist - create and start it
-            echo "Creating container '$CONTAINER_NAME' for sandbox..."
-            local create_opts=()
-            for opt in "${DOCKER_OPTS[@]}"; do
-                case "$opt" in
-                    --rm|-d)
-                        continue
-                        ;;
-                esac
-                create_opts+=("$opt")
-            done
-
-            if ! docker create \
-                --interactive \
-                --tty \
-                "${create_opts[@]}" \
-                --name "$CONTAINER_NAME" \
-                -v "$ABSOLUTE_PATH:/sandbox" \
-                -w /sandbox \
-                "$IMAGE_NAME"; then
-                echo "Error: failed to create container '$CONTAINER_NAME'." >&2
-                return 1
-            fi
-            container_created=1
-
-            if ! docker start "$CONTAINER_NAME" &> /dev/null; then
-                echo "Error: failed to start container '$CONTAINER_NAME'." >&2
-                return 1
-            fi
-        else
-            # Container exists but not running - start it
-            echo "Starting existing container '$CONTAINER_NAME'..."
-            if ! docker start "$CONTAINER_NAME" &> /dev/null; then
-                echo "Error: failed to start container '$CONTAINER_NAME'." >&2
-                return 1
-            fi
+    if [ -n "$CONTAINER_ID" ]; then
+        if ! docker container inspect "$CONTAINER_ID" &> /dev/null; then
+            CONTAINER_ID=""
         fi
+    fi
+    refresh_container_name
+
+    local container_running=""
+    if [ -n "$CONTAINER_ID" ]; then
+        container_running=$(docker ps -q -f "id=$CONTAINER_ID")
+    fi
+
+    if [ -z "$CONTAINER_ID" ]; then
+        echo "Creating container '$CONTAINER_NAME' for sandbox..."
+        local create_opts=()
+        local skip_next=0
+        for opt in "${DOCKER_OPTS[@]}"; do
+            if [ "$skip_next" -eq 1 ]; then
+                skip_next=0
+                continue
+            fi
+            case "$opt" in
+                --rm|-d)
+                    continue
+                    ;;
+                --name)
+                    skip_next=1
+                    continue
+                    ;;
+                --name=*)
+                    continue
+                    ;;
+            esac
+            create_opts+=("$opt")
+        done
+
+        local new_container_id
+        if ! new_container_id=$(docker create \
+            --interactive \
+            --tty \
+            "${create_opts[@]}" \
+            --name "$CONTAINER_NAME" \
+            --label cli-sandbox.tag="$TAG" \
+            --label cli-sandbox.hash="$HASH" \
+            --label cli-sandbox.index="$INDEX" \
+            -v "$ABSOLUTE_PATH:/sandbox" \
+            -w /sandbox \
+            "$IMAGE_NAME"); then
+            echo "Error: failed to create sandbox container." >&2
+            return 1
+        fi
+        CONTAINER_ID=$(printf '%s' "$new_container_id" | tr -d ' \n\r')
+        if [ -z "$CONTAINER_ID" ]; then
+            echo "Error: received empty container ID from docker create." >&2
+            return 1
+        fi
+        if ! persist_container_metadata "$CONTAINER_ID"; then
+            return 1
+        fi
+        refresh_container_name
+        container_created=1
+
+        if ! docker start "$CONTAINER_ID" &> /dev/null; then
+            echo "Error: failed to start container '$CONTAINER_ID'." >&2
+            return 1
+        fi
+        refresh_container_name
+    elif [ -z "$container_running" ]; then
+        echo "Starting existing container '$CONTAINER_ID'..."
+        if ! docker start "$CONTAINER_ID" &> /dev/null; then
+            echo "Error: failed to start container '$CONTAINER_ID'." >&2
+            return 1
+        fi
+        refresh_container_name
     fi
 
     if [ "$container_created" -eq 1 ] || [ "$FORCE_USER_SETUP" -eq 1 ]; then
@@ -176,7 +262,7 @@ stage_setup() {
             --user root \
             --env TARGET_UID="$HOST_UID" \
             --env TARGET_GID="$HOST_GID" \
-            "$CONTAINER_NAME" \
+            "$CONTAINER_ID" \
             /usr/local/bin/setup-host-user.sh; then
             echo "Error: host user setup failed." >&2
             return 1
@@ -186,7 +272,13 @@ stage_setup() {
 
 stage_run() {
     echo "Sandbox target: $ABSOLUTE_PATH"
-    echo "Container name: $CONTAINER_NAME"
+    refresh_container_name
+    if [ -n "$ACTUAL_CONTAINER_NAME" ]; then
+        echo "Container name: $ACTUAL_CONTAINER_NAME"
+    else
+        echo "Container name: (unavailable)"
+    fi
+    echo "Container ID: $CONTAINER_ID"
 
     local exec_user
     if [ "$RUN_AS_ROOT" -eq 1 ]; then
@@ -198,7 +290,7 @@ stage_run() {
     docker exec -it \
         --user "$exec_user" \
         --workdir /sandbox \
-        "$CONTAINER_NAME" \
+        "$CONTAINER_ID" \
         bash
     return $?
 }
@@ -208,7 +300,9 @@ main() {
     initialize_config_file
     parse_arguments "$@"
     resolve_target_details
-    load_or_create_index
+    if ! load_or_create_index; then
+        exit 1
+    fi
     if ! stage_setup; then
         exit 1
     fi

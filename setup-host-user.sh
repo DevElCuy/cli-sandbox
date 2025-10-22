@@ -9,6 +9,11 @@ for var in "${required_vars[@]}"; do
     fi
 done
 
+if [ "${TARGET_UID}" -eq 0 ]; then
+    echo "Skipping user setup for root (UID 0)."
+    exit 0
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "Error: setup-host-user.sh must run as root." >&2
     exit 1
