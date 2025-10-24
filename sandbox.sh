@@ -287,11 +287,13 @@ stage_run() {
         exec_user="${HOST_UID}:${HOST_GID}"
     fi
 
-    docker exec -it \
-        --user "$exec_user" \
-        --workdir /sandbox \
-        "$CONTAINER_ID" \
-        bash
+    local prompt_hostname="${ACTUAL_CONTAINER_NAME:-$CONTAINER_NAME}"
+    local exec_args=(docker exec -it --user "$exec_user" --workdir /sandbox)
+    if [ -n "$prompt_hostname" ]; then
+        exec_args+=(--env CLI_SANDBOX_HOSTNAME="$prompt_hostname")
+    fi
+    exec_args+=("$CONTAINER_ID" bash)
+    "${exec_args[@]}"
     return $?
 }
 
