@@ -354,6 +354,9 @@ stage_run() {
     exec_args+=(--env TERM="$TERM")
     exec_args+=(--env COLORTERM="$COLORTERM")
     exec_args+=(--env COLORFGBG="$COLORFGBG")
+    exec_args+=(--env LC_ALL="${LC_ALL:-C.UTF-8}")
+    exec_args+=(--env LANG="${LANG:-C.UTF-8}")
+    exec_args+=(--env LC_CTYPE="${LC_CTYPE:-C.UTF-8}")
     exec_args+=("$CONTAINER_ID" bash)
     "${exec_args[@]}"
     return $?

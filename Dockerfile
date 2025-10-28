@@ -2,6 +2,11 @@ FROM ubuntu:latest
 
 # Install dependencies for nvm
 RUN apt-get update && apt-get install -y curl build-essential ca-certificates tini
+# Install extra tools
+RUN apt-get install -y vim git less locales && \
+    sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && \
+    locale-gen
+ENV LANG=en_US.UTF-8
 # Clean-up APT
 #RUN rm -rf /var/lib/apt/lists/*
 
