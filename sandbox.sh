@@ -12,10 +12,71 @@ CONTAINER_NAME=""
 ACTUAL_CONTAINER_NAME=""
 CUSTOM_TAG_SET=0
 
+show_help() {
+    cat << 'EOF'
+Usage: sandbox.sh [OPTIONS] [TARGET_DIR] [CUSTOM_TAG]
+
+Create and attach to a persistent Docker-based sandbox environment for a directory.
+
+ARGUMENTS:
+  TARGET_DIR          Directory to mount as sandbox workspace (default: current directory)
+  CUSTOM_TAG          Custom tag for container name (default: directory basename)
+
+OPTIONS:
+  --setup-user        Force re-run of user setup in the container
+  --root              Run shell as root instead of host user
+  -h, --help          Show this help message and exit
+
+DOCKER OPTIONS:
+  Any Docker options (e.g., -v, -e, -p, --env, --volume, --publish) are passed
+  through to 'docker create'. Use '--' to explicitly separate Docker options.
+
+EXAMPLES:
+  # Use current directory as sandbox
+  sandbox.sh
+
+  # Use specific directory
+  sandbox.sh /path/to/project
+
+  # Use custom container tag
+  sandbox.sh /path/to/project my-custom-tag
+
+  # Run as root user
+  sandbox.sh --root
+
+  # Pass Docker port mapping
+  sandbox.sh -p 8080:8080 /path/to/project
+
+  # Force user setup
+  sandbox.sh --setup-user /path/to/project
+
+CONTAINER NAMING:
+  Containers are named: <tag>-<hash>-<index>
+  - tag: Directory basename or CUSTOM_TAG
+  - hash: CRC32 hash of absolute path (first 4 chars)
+  - index: Auto-incremented for same hash
+
+PERSISTENCE:
+  Container state is tracked in: ~/.config/cli-sandbox/state.json
+  Containers persist between runs and are reused for the same directory.
+
+EOF
+}
+
+error_exit() {
+    local message="$1"
+    local show_help_hint="${2:-0}"
+    echo "$message" >&2
+    if [ "$show_help_hint" -eq 1 ]; then
+        echo "Run 'sandbox.sh --help' for usage information." >&2
+    fi
+    exit 1
+}
+
 ensure_dependencies() {
-    if ! command -v jq &> /dev/null; then echo "Error: jq is not installed." >&2; exit 1; fi
-    if ! command -v realpath &> /dev/null; then echo "Error: realpath is not installed." >&2; exit 1; fi
-    if ! command -v crc32 &> /dev/null; then echo "Error: crc32 is not installed." >&2; exit 1; fi
+    if ! command -v jq &> /dev/null; then error_exit "Error: jq is not installed."; fi
+    if ! command -v realpath &> /dev/null; then error_exit "Error: realpath is not installed."; fi
+    if ! command -v crc32 &> /dev/null; then error_exit "Error: crc32 is not installed."; fi
 }
 
 initialize_config_file() {
@@ -35,6 +96,11 @@ parse_arguments() {
             DOCKER_OPTS+=("$arg")
             EXPECT_DOCKER_VALUE=0
             continue
+        fi
+
+        if [ "$arg" = "-h" ] || [ "$arg" = "--help" ]; then
+            show_help
+            exit 0
         fi
 
         if [ "$arg" = "--setup-user" ]; then
@@ -74,6 +140,11 @@ parse_arguments() {
 resolve_target_details() {
     TARGET_DIR=${SCRIPT_ARGS[0]:-.}
     ABSOLUTE_PATH=$(realpath "$TARGET_DIR")
+
+    if [ ! -d "$ABSOLUTE_PATH" ]; then
+        error_exit "Error: directory '$ABSOLUTE_PATH' does not exist." 1
+    fi
+
     DEFAULT_TAG=$(basename "$ABSOLUTE_PATH" | tr '[:upper:]' '[:lower:]')
     CUSTOM_TAG=${SCRIPT_ARGS[1]:-}
     TAG=${CUSTOM_TAG:-$DEFAULT_TAG}
@@ -86,11 +157,10 @@ resolve_target_details() {
 
     if [[ ! $TAG =~ $VALID_TAG_REGEX ]]; then
         if [ -z "$CUSTOM_TAG" ]; then
-            echo "Error: directory basename '$DEFAULT_TAG' is not a valid container tag. Provide a custom tag (second argument) matching [A-Za-z0-9_.-]." >&2
+            error_exit "Error: directory basename '$DEFAULT_TAG' is not a valid container tag. Provide a custom tag (second argument) matching [A-Za-z0-9_.-]." 1
         else
-            echo "Error: provided tag '$CUSTOM_TAG' must match [A-Za-z0-9_.-]." >&2
+            error_exit "Error: provided tag '$CUSTOM_TAG' must match [A-Za-z0-9_.-]." 1
         fi
-        exit 1
     fi
 
     HOST_UID=$(id -u)
@@ -98,8 +168,7 @@ resolve_target_details() {
 
     RAW_HASH=$(crc32 <(printf '%s' "$ABSOLUTE_PATH") 2>/dev/null | tr -d '\n' | tr '[:upper:]' '[:lower:]')
     if [ -z "$RAW_HASH" ]; then
-        echo "Error: failed to generate CRC32 hash for '$ABSOLUTE_PATH'." >&2
-        exit 1
+        error_exit "Error: failed to generate CRC32 hash for '$ABSOLUTE_PATH'."
     fi
     HASH=${RAW_HASH:0:4}
 }
@@ -157,12 +226,10 @@ persist_container_metadata() {
              --arg container_id "$container_id_value" \
              '.[$path] = {hash: $hash, index: $index, tag: $tag} + (if $container_id == "" then {} else {container_id: $container_id} end)' \
              "$CONFIG_FILE" > "$CONFIG_FILE.tmp"; then
-        echo "Error: failed to update sandbox state for '$ABSOLUTE_PATH'." >&2
-        return 1
+        error_exit "Error: failed to update sandbox state for '$ABSOLUTE_PATH'."
     fi
     if ! mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"; then
-        echo "Error: failed to persist sandbox state for '$ABSOLUTE_PATH'." >&2
-        return 1
+        error_exit "Error: failed to persist sandbox state for '$ABSOLUTE_PATH'."
     fi
 }
 
@@ -173,8 +240,7 @@ stage_setup() {
         local dockerfile_dir
         dockerfile_dir=$(dirname "$(realpath "$0")")
         if ! docker build -t "$IMAGE_NAME" "$dockerfile_dir"; then
-            echo "Error: Docker image build failed." >&2
-            return 1
+            error_exit "Error: Docker image build failed."
         fi
     fi
 
@@ -228,30 +294,24 @@ stage_setup() {
             -v "$ABSOLUTE_PATH:/sandbox" \
             -w /sandbox \
             "$IMAGE_NAME"); then
-            echo "Error: failed to create sandbox container." >&2
-            return 1
+            error_exit "Error: failed to create sandbox container."
         fi
         CONTAINER_ID=$(printf '%s' "$new_container_id" | tr -d ' \n\r')
         if [ -z "$CONTAINER_ID" ]; then
-            echo "Error: received empty container ID from docker create." >&2
-            return 1
+            error_exit "Error: received empty container ID from docker create."
         fi
-        if ! persist_container_metadata "$CONTAINER_ID"; then
-            return 1
-        fi
+        persist_container_metadata "$CONTAINER_ID"
         refresh_container_name
         container_created=1
 
         if ! docker start "$CONTAINER_ID" &> /dev/null; then
-            echo "Error: failed to start container '$CONTAINER_ID'." >&2
-            return 1
+            error_exit "Error: failed to start container '$CONTAINER_ID'."
         fi
         refresh_container_name
     elif [ -z "$container_running" ]; then
         echo "Starting existing container '$CONTAINER_ID'..."
         if ! docker start "$CONTAINER_ID" &> /dev/null; then
-            echo "Error: failed to start container '$CONTAINER_ID'." >&2
-            return 1
+            error_exit "Error: failed to start container '$CONTAINER_ID'."
         fi
         refresh_container_name
     fi
@@ -264,8 +324,7 @@ stage_setup() {
             --env TARGET_GID="$HOST_GID" \
             "$CONTAINER_ID" \
             /usr/local/bin/setup-host-user.sh; then
-            echo "Error: host user setup failed." >&2
-            return 1
+            error_exit "Error: host user setup failed."
         fi
     fi
 }
@@ -292,6 +351,9 @@ stage_run() {
     if [ -n "$prompt_hostname" ]; then
         exec_args+=(--env CLI_SANDBOX_HOSTNAME="$prompt_hostname")
     fi
+    exec_args+=(--env TERM="$TERM")
+    exec_args+=(--env COLORTERM="$COLORTERM")
+    exec_args+=(--env COLORFGBG="$COLORFGBG")
     exec_args+=("$CONTAINER_ID" bash)
     "${exec_args[@]}"
     return $?
