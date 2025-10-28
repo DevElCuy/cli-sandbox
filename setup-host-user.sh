@@ -42,6 +42,8 @@ echo "Installing Node.js $NODE_VERSION for user $TARGET_USER..."
 su - "$TARGET_USER" -c "export NVM_DIR=\"$NVM_DIR\" && [ -s \"$NVM_DIR/nvm.sh\" ] && \\. \"$NVM_DIR/nvm.sh\" && nvm install $NODE_VERSION && nvm alias default $NODE_VERSION"
 echo "Node.js $NODE_VERSION installed and set as default."
 
+echo "$(ip route | awk '/default/ {print $3}') host.docker.internal" >> /etc/hosts
+
 MARKER_DIR=/etc/cli-sandbox
 MARKER_FILE=${MARKER_DIR}/user-${TARGET_UID}.marker
 
