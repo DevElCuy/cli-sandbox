@@ -44,7 +44,7 @@ echo "Node.js $NODE_VERSION installed and set as default."
 
 echo "$(ip route | awk '/default/ {print $3}') host.docker.internal" >> /etc/hosts
 
-MARKER_DIR=/etc/cli-sandbox
+MARKER_DIR=/etc/cuybox
 MARKER_FILE=${MARKER_DIR}/user-${TARGET_UID}.marker
 
 mkdir -p "$MARKER_DIR"

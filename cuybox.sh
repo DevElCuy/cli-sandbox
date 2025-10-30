@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # --- Configuration ---
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cli-sandbox"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cuybox"
 CONFIG_FILE="$CONFIG_DIR/state.json"
-IMAGE_NAME="develcuy/cli-sandbox:latest"
+IMAGE_NAME="develcuy/cuybox:latest"
 FORCE_USER_SETUP=0
 RUN_AS_ROOT=0
 CONTAINER_ID=""
@@ -14,7 +14,7 @@ CUSTOM_TAG_SET=0
 
 show_help() {
     cat << 'EOF'
-Usage: sandbox.sh [OPTIONS] [TARGET_DIR] [CUSTOM_TAG]
+Usage: cuybox.sh [OPTIONS] [TARGET_DIR] [CUSTOM_TAG]
 
 Create and attach to a persistent Docker-based sandbox environment for a directory.
 
@@ -33,22 +33,22 @@ DOCKER OPTIONS:
 
 EXAMPLES:
   # Use current directory as sandbox
-  sandbox.sh
+  cuybox.sh
 
   # Use specific directory
-  sandbox.sh /path/to/project
+  cuybox.sh /path/to/project
 
   # Use custom container tag
-  sandbox.sh /path/to/project my-custom-tag
+  cuybox.sh /path/to/project my-custom-tag
 
   # Run as root user
-  sandbox.sh --root
+  cuybox.sh --root
 
   # Pass Docker port mapping
-  sandbox.sh -p 8080:8080 /path/to/project
+  cuybox.sh -p 8080:8080 /path/to/project
 
   # Force user setup
-  sandbox.sh --setup-user /path/to/project
+  cuybox.sh --setup-user /path/to/project
 
 CONTAINER NAMING:
   Containers are named: <tag>-<hash>-<index>
@@ -57,7 +57,7 @@ CONTAINER NAMING:
   - index: Auto-incremented for same hash
 
 PERSISTENCE:
-  Container state is tracked in: ~/.config/cli-sandbox/state.json
+  Container state is tracked in: ~/.config/cuybox/state.json
   Containers persist between runs and are reused for the same directory.
 
 EOF
@@ -68,7 +68,7 @@ error_exit() {
     local show_help_hint="${2:-0}"
     echo "$message" >&2
     if [ "$show_help_hint" -eq 1 ]; then
-        echo "Run 'sandbox.sh --help' for usage information." >&2
+        echo "Run 'cuybox.sh --help' for usage information." >&2
     fi
     exit 1
 }
@@ -80,6 +80,11 @@ ensure_dependencies() {
 }
 
 initialize_config_file() {
+    local old_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/cli-sandbox"
+    if [ -d "$old_config_dir" ] && [ ! -d "$CONFIG_DIR" ]; then
+        echo "Migrating config from '$old_config_dir' to '$CONFIG_DIR'..."
+        mv "$old_config_dir" "$CONFIG_DIR"
+    fi
     mkdir -p "$CONFIG_DIR"
     [ -f "$CONFIG_FILE" ] || echo "{}" > "$CONFIG_FILE"
 }
@@ -288,9 +293,9 @@ stage_setup() {
             --tty \
             "${create_opts[@]}" \
             --name "$CONTAINER_NAME" \
-            --label cli-sandbox.tag="$TAG" \
-            --label cli-sandbox.hash="$HASH" \
-            --label cli-sandbox.index="$INDEX" \
+            --label cuybox.tag="$TAG" \
+            --label cuybox.hash="$HASH" \
+            --label cuybox.index="$INDEX" \
             -v "$ABSOLUTE_PATH:/sandbox" \
             -w /sandbox \
             "$IMAGE_NAME"); then
