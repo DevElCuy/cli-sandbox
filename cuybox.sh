@@ -11,6 +11,7 @@ TAG=""
 CONTAINER_NAME=""
 ACTUAL_CONTAINER_NAME=""
 CUSTOM_TAG_SET=0
+SET_HOSTNAME=""
 
 show_help() {
     cat << 'EOF'
@@ -25,6 +26,7 @@ ARGUMENTS:
 OPTIONS:
   --setup-user        Force re-run of user setup in the container
   --root              Run shell as root instead of host user
+  --set-hostname NAME Map hostname to container IP in /etc/hosts (requires sudo, exits without entering sandbox)
   -h, --help          Show this help message and exit
 
 DOCKER OPTIONS:
@@ -49,6 +51,9 @@ EXAMPLES:
 
   # Force user setup
   cuybox.sh --setup-user /path/to/project
+
+  # Set hostname in /etc/hosts
+  cuybox.sh --set-hostname myapp.local /path/to/project
 
 CONTAINER NAMING:
   Containers are named: <tag>-<hash>-<index>
@@ -93,10 +98,17 @@ parse_arguments() {
     DOCKER_OPTS=()
     SCRIPT_ARGS=()
     EXPECT_DOCKER_VALUE=0
+    EXPECT_HOSTNAME_VALUE=0
     FORCE_USER_SETUP=0
     AFTER_DASH_DASH=0
 
     for arg in "$@"; do
+        if [ "$EXPECT_HOSTNAME_VALUE" -eq 1 ]; then
+            SET_HOSTNAME="$arg"
+            EXPECT_HOSTNAME_VALUE=0
+            continue
+        fi
+
         if [ "$EXPECT_DOCKER_VALUE" -eq 1 ]; then
             DOCKER_OPTS+=("$arg")
             EXPECT_DOCKER_VALUE=0
@@ -115,6 +127,11 @@ parse_arguments() {
 
         if [ "$arg" = "--root" ]; then
             RUN_AS_ROOT=1
+            continue
+        fi
+
+        if [ "$arg" = "--set-hostname" ]; then
+            EXPECT_HOSTNAME_VALUE=1
             continue
         fi
 
@@ -238,6 +255,41 @@ persist_container_metadata() {
     fi
 }
 
+update_hosts_file() {
+    local hostname="$1"
+    local container_id="$2"
+
+    if [ -z "$hostname" ] || [ -z "$container_id" ]; then
+        return 0
+    fi
+
+    echo "Updating /etc/hosts with hostname '$hostname'..."
+
+    # Get container IP address
+    local container_ip
+    if ! container_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_id" 2>/dev/null); then
+        error_exit "Error: failed to get container IP address."
+    fi
+
+    if [ -z "$container_ip" ]; then
+        error_exit "Error: container has no IP address assigned."
+    fi
+
+    echo "Container IP: $container_ip"
+
+    # Remove old entries for this hostname
+    if ! sudo sed -i.bak "/[[:space:]]${hostname}$/d" /etc/hosts; then
+        error_exit "Error: failed to update /etc/hosts (permission denied or sed failed)."
+    fi
+
+    # Add new entry
+    if ! echo "$container_ip $hostname" | sudo tee -a /etc/hosts > /dev/null; then
+        error_exit "Error: failed to add hostname to /etc/hosts."
+    fi
+
+    echo "Hostname '$hostname' mapped to $container_ip in /etc/hosts"
+}
+
 stage_setup() {
     # 1. Ensure image exists
     if ! docker image inspect "$IMAGE_NAME" &> /dev/null; then
@@ -332,6 +384,11 @@ stage_setup() {
             error_exit "Error: host user setup failed."
         fi
     fi
+
+    # Update /etc/hosts if requested
+    if [ -n "$SET_HOSTNAME" ]; then
+        update_hosts_file "$SET_HOSTNAME" "$CONTAINER_ID"
+    fi
 }
 
 stage_run() {
@@ -378,6 +435,13 @@ main() {
     if ! stage_setup; then
         exit 1
     fi
+
+    # If only setting hostname, exit without entering sandbox
+    if [ -n "$SET_HOSTNAME" ]; then
+        echo "Hostname setup complete. Use cuybox.sh without --set-hostname to enter the sandbox."
+        exit 0
+    fi
+
     stage_run
     exit $?
 }
