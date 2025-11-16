@@ -12,6 +12,8 @@ CONTAINER_NAME=""
 ACTUAL_CONTAINER_NAME=""
 CUSTOM_TAG_SET=0
 SET_HOSTNAME=""
+PORT_FORWARD_SPECS=()
+PORT_FORWARD_PIDS=()
 
 show_help() {
     cat << 'EOF'
@@ -27,6 +29,8 @@ OPTIONS:
   --setup-user        Force re-run of user setup in the container
   --root              Run shell as root instead of host user
   --set-hostname NAME Map hostname to container IP in /etc/hosts (requires sudo, exits without entering sandbox)
+  --forward-port PORT|HOST_PORT:CONTAINER_PORT|BIND:HOST_PORT:CONTAINER_PORT
+                       Run a standalone host->container port proxy (defaults to binding 0.0.0.0 and same host/container port when only PORT is given; repeat flag to add more mappings; requires running container and socat; Ctrl-C to stop)
   -h, --help          Show this help message and exit
 
 DOCKER OPTIONS:
@@ -54,6 +58,15 @@ EXAMPLES:
 
   # Set hostname in /etc/hosts
   cuybox.sh --set-hostname myapp.local /path/to/project
+
+  # Forward host port 8080 to container port 8080 (run in another terminal, Ctrl-C to stop)
+  cuybox.sh --forward-port 8080 /path/to/project
+
+  # Forward host port 8080 to container port 3000
+  cuybox.sh --forward-port 8080:3000 /path/to/project
+
+  # Forward 127.0.0.1:9000 to container port 9000
+  cuybox.sh --forward-port 127.0.0.1:9000:9000 /path/to/project
 
 CONTAINER NAMING:
   Containers are named: <tag>-<hash>-<index>
@@ -94,11 +107,60 @@ initialize_config_file() {
     [ -f "$CONFIG_FILE" ] || echo "{}" > "$CONFIG_FILE"
 }
 
+add_port_forward_spec() {
+    local spec="$1"
+
+    if [ -z "$spec" ]; then
+        error_exit "Error: --forward-port requires a value."
+    fi
+
+    local part1 part2 part3 part_extra
+    local IFS=':'
+    read -r part1 part2 part3 part_extra <<< "$spec"
+
+    if [ -n "$part_extra" ]; then
+        error_exit "Error: invalid mapping '$spec'. Use PORT, HOST_PORT:CONTAINER_PORT, or BIND:HOST_PORT:CONTAINER_PORT."
+    fi
+
+    local bind_addr host_port container_port
+    if [ -z "$part2" ]; then
+        bind_addr="0.0.0.0"
+        host_port="$part1"
+        container_port="$part1"
+    elif [ -n "$part3" ]; then
+        bind_addr="$part1"
+        host_port="$part2"
+        container_port="$part3"
+        if [ -z "$bind_addr" ]; then
+            error_exit "Error: binding address cannot be empty in '$spec'."
+        fi
+    else
+        bind_addr="0.0.0.0"
+        host_port="$part1"
+        container_port="$part2"
+    fi
+
+    if [ -z "$host_port" ] || [ -z "$container_port" ]; then
+        error_exit "Error: invalid mapping '$spec'. Expected PORT, HOST_PORT:CONTAINER_PORT, or BIND:HOST_PORT:CONTAINER_PORT."
+    fi
+
+    if [[ ! "$host_port" =~ ^[0-9]+$ ]] || (( host_port < 1 || host_port > 65535 )); then
+        error_exit "Error: host port in '$spec' must be an integer between 1 and 65535."
+    fi
+
+    if [[ ! "$container_port" =~ ^[0-9]+$ ]] || (( container_port < 1 || container_port > 65535 )); then
+        error_exit "Error: container port in '$spec' must be an integer between 1 and 65535."
+    fi
+
+    PORT_FORWARD_SPECS+=("${bind_addr}|${host_port}|${container_port}")
+}
+
 parse_arguments() {
     DOCKER_OPTS=()
     SCRIPT_ARGS=()
     EXPECT_DOCKER_VALUE=0
     EXPECT_HOSTNAME_VALUE=0
+    EXPECT_FORWARD_PORT_VALUE=0
     FORCE_USER_SETUP=0
     AFTER_DASH_DASH=0
 
@@ -106,6 +168,12 @@ parse_arguments() {
         if [ "$EXPECT_HOSTNAME_VALUE" -eq 1 ]; then
             SET_HOSTNAME="$arg"
             EXPECT_HOSTNAME_VALUE=0
+            continue
+        fi
+
+        if [ "$EXPECT_FORWARD_PORT_VALUE" -eq 1 ]; then
+            add_port_forward_spec "$arg"
+            EXPECT_FORWARD_PORT_VALUE=0
             continue
         fi
 
@@ -135,6 +203,16 @@ parse_arguments() {
             continue
         fi
 
+        if [ "$arg" = "--forward-port" ]; then
+            EXPECT_FORWARD_PORT_VALUE=1
+            continue
+        fi
+
+        if [[ "$arg" == --forward-port=* ]]; then
+            add_port_forward_spec "${arg#*=}"
+            continue
+        fi
+
         if [ "$AFTER_DASH_DASH" -eq 1 ]; then
             DOCKER_OPTS+=("$arg")
             continue
@@ -157,6 +235,14 @@ parse_arguments() {
                 ;;
         esac
     done
+
+    if [ "$EXPECT_HOSTNAME_VALUE" -eq 1 ]; then
+        error_exit "Error: --set-hostname requires a hostname argument."
+    fi
+
+    if [ "$EXPECT_FORWARD_PORT_VALUE" -eq 1 ]; then
+        error_exit "Error: --forward-port requires a mapping value."
+    fi
 }
 
 resolve_target_details() {
@@ -267,7 +353,7 @@ update_hosts_file() {
 
     # Get container IP address
     local container_ip
-    if ! container_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_id" 2>/dev/null); then
+    if ! container_ip=$(get_container_ip "$container_id"); then
         error_exit "Error: failed to get container IP address."
     fi
 
@@ -288,6 +374,141 @@ update_hosts_file() {
     fi
 
     echo "Hostname '$hostname' mapped to $container_ip in /etc/hosts"
+}
+
+get_container_ip() {
+    local container_id="$1"
+    if [ -z "$container_id" ]; then
+        return 1
+    fi
+    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_id" 2>/dev/null
+}
+
+start_port_forwarders() {
+    if [ ${#PORT_FORWARD_SPECS[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    if ! command -v socat &> /dev/null; then
+        error_exit "Error: socat is required when using --forward-port."
+    fi
+
+    if [ -z "$CONTAINER_ID" ]; then
+        error_exit "Error: container ID is unavailable for port forwarding."
+    fi
+
+    local container_ip
+    if ! container_ip=$(get_container_ip "$CONTAINER_ID"); then
+        error_exit "Error: failed to get container IP address for port forwarding."
+    fi
+
+    if [ -z "$container_ip" ]; then
+        error_exit "Error: container has no IP address assigned for port forwarding."
+    fi
+
+    for spec in "${PORT_FORWARD_SPECS[@]}"; do
+        local bind_addr host_port container_port
+        local IFS='|'
+        read -r bind_addr host_port container_port <<< "$spec"
+
+        echo "  Forwarding ${bind_addr}:${host_port} -> ${container_ip}:${container_port}"
+
+        socat TCP-LISTEN:"$host_port",fork,bind="$bind_addr" TCP:"$container_ip":"$container_port" &
+        local socat_pid=$!
+
+        # Give socat a moment to report immediate failures (port already in use, etc.)
+        sleep 0.1
+        if ! kill -0 "$socat_pid" &> /dev/null; then
+            wait "$socat_pid" 2> /dev/null
+            error_exit "Error: failed to start port forward $host_port:$container_port."
+        fi
+
+        PORT_FORWARD_PIDS+=("$socat_pid")
+    done
+}
+
+cleanup_port_forwarders() {
+    if [ ${#PORT_FORWARD_PIDS[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    for pid in "${PORT_FORWARD_PIDS[@]}"; do
+        if kill -0 "$pid" &> /dev/null; then
+            kill "$pid" &> /dev/null
+            wait "$pid" 2> /dev/null
+        fi
+    done
+
+    PORT_FORWARD_PIDS=()
+}
+
+trap cleanup_port_forwarders EXIT
+
+wait_port_forwarders() {
+    if [ ${#PORT_FORWARD_PIDS[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    local pid
+    local wait_status=0
+    for pid in "${PORT_FORWARD_PIDS[@]}"; do
+        if ! wait "$pid"; then
+            wait_status=$?
+            break
+        fi
+    done
+
+    return $wait_status
+}
+
+ensure_container_ready_for_forwarding() {
+    if [ -z "$CONTAINER_ID" ]; then
+        error_exit "Error: no sandbox container is registered for '$ABSOLUTE_PATH'. Start it once with 'cuybox.sh $TARGET_DIR' before using --forward-port."
+    fi
+
+    if ! docker container inspect "$CONTAINER_ID" &> /dev/null; then
+        error_exit "Error: container '$CONTAINER_NAME' does not exist. Start the sandbox normally before using --forward-port."
+    fi
+
+    local running
+    running=$(docker inspect -f '{{.State.Running}}' "$CONTAINER_ID" 2>/dev/null)
+    if [ "$running" != "true" ]; then
+        error_exit "Error: container '$CONTAINER_NAME' is not running. Start it with 'cuybox.sh $TARGET_DIR' before forwarding ports."
+    fi
+
+    refresh_container_name
+}
+
+run_forward_port_mode() {
+    ensure_container_ready_for_forwarding
+
+    echo "Sandbox target: $ABSOLUTE_PATH"
+    if [ -n "$ACTUAL_CONTAINER_NAME" ]; then
+        echo "Container name: $ACTUAL_CONTAINER_NAME"
+    else
+        echo "Container name: (unavailable)"
+    fi
+    echo "Container ID: $CONTAINER_ID"
+
+    if ! start_port_forwarders; then
+        return 1
+    fi
+
+    echo "Port forwarding active. Press Ctrl-C to stop."
+
+    wait_port_forwarders
+    local wait_status=$?
+    cleanup_port_forwarders
+
+    if [ $wait_status -ne 0 ]; then
+        if [ $wait_status -gt 128 ]; then
+            return $wait_status
+        fi
+        error_exit "Error: port forwarding exited unexpectedly (status $wait_status)."
+    fi
+
+    echo "Port forwarding stopped."
+    return 0
 }
 
 stage_setup() {
@@ -401,6 +622,13 @@ stage_run() {
     fi
     echo "Container ID: $CONTAINER_ID"
 
+    local container_ip=""
+    if container_ip=$(get_container_ip "$CONTAINER_ID" 2>/dev/null); then
+        if [ -n "$container_ip" ]; then
+            echo "Container IP: $container_ip"
+        fi
+    fi
+
     local exec_user
     if [ "$RUN_AS_ROOT" -eq 1 ]; then
         exec_user="root"
@@ -432,6 +660,30 @@ main() {
     if ! load_or_create_index; then
         exit 1
     fi
+
+    local forward_mode_requested=0
+    if [ ${#PORT_FORWARD_SPECS[@]} -gt 0 ]; then
+        forward_mode_requested=1
+    fi
+
+    if [ "$forward_mode_requested" -eq 1 ]; then
+        if [ "$FORCE_USER_SETUP" -eq 1 ]; then
+            error_exit "Error: --setup-user cannot be combined with --forward-port."
+        fi
+        if [ "$RUN_AS_ROOT" -eq 1 ]; then
+            error_exit "Error: --root cannot be combined with --forward-port."
+        fi
+        if [ -n "$SET_HOSTNAME" ]; then
+            error_exit "Error: --set-hostname cannot be combined with --forward-port."
+        fi
+        if [ ${#DOCKER_OPTS[@]} -gt 0 ]; then
+            error_exit "Error: Docker options cannot be used with --forward-port."
+        fi
+
+        run_forward_port_mode
+        exit $?
+    fi
+
     if ! stage_setup; then
         exit 1
     fi

@@ -13,6 +13,8 @@ The `cuybox.sh` script handles building the necessary Docker image, as well as c
 - **Pre-configured Environment**: The Docker image comes with `nvm` and the latest version of `Node.js v22` ready to use.
 - **Graceful Lifecycle**: Containers run under `tini` with an idle process so they stop quickly and cleanly even after long sessions.
 - **Flexibility**: Allows passing custom options directly to the `docker run` command (e.g., to delete a container on exit with `--rm`).
+- **Ephemeral Port Forwarding**: Run `--forward-port PORT`, `HOST_PORT:CONTAINER_PORT` (default bind `0.0.0.0`), or `BIND:HOST_PORT:CONTAINER_PORT`—and repeat the flag as needed—to spin up standalone `socat` bridges to a running sandbox until `Ctrl+C`.
+- **Discoverable Container IP**: The script prints the container IP on launch, so you can use it directly without running `--set-hostname` when you just need the address.
 
 ## Prerequisites
 
@@ -22,6 +24,7 @@ Before using the script, ensure you have the following tools installed on your s
 - **jq**: For command-line JSON processing.
 - **coreutils**: Provides `realpath`, `basename`, `cut`, etc.
 - **crc32**: For generating short hashes (may be in `libarchive-tools` on some Linux distributions).
+- **socat** (optional): Required only when using `--forward-port` to proxy ports from the host to the container.
 
 ## Usage
 
@@ -58,7 +61,15 @@ The `cuybox.sh` script must be executable (`chmod +x cuybox.sh`).
     ./cuybox.sh . -e MY_VARIABLE=my_value
     ```
 
-6.  **Exit the sandbox**:
+6.  **Forward a port from an already-running sandbox (requires `socat`)**:
+    First, start the sandbox normally so the container is running. In another terminal, run the forwarding command and leave it running; stop it at any time with `Ctrl+C`. A lone `PORT` maps `0.0.0.0:PORT -> container:PORT`, `HOST_PORT:CONTAINER_PORT` lets you choose different ports, and `BIND:HOST_PORT:CONTAINER_PORT` lets you constrain the host interface. You can repeat the flag to forward multiple ports, and the script will refuse to run if the container is stopped.
+    ```bash
+    ./cuybox.sh --forward-port 8080 /path/to/your/project
+    ./cuybox.sh --forward-port 8080:3000 /path/to/your/project
+    ./cuybox.sh --forward-port 127.0.0.1:9000:9000 /path/to/your/project
+    ```
+
+7.  **Exit the sandbox**:
     Simply type `exit` or press `Ctrl+D`.
 
 ## How It Works
