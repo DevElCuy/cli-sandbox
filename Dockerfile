@@ -1,9 +1,9 @@
-FROM ubuntu:latest
+FROM phusion/baseimage:noble-1.0.2
 
-# Install dependencies for nvm
-RUN apt-get update && apt-get install -y curl build-essential ca-certificates tini
-# Install extra tools
-RUN apt-get install -y vim git less locales && \
+# Install dependencies for nvm and extra tools
+RUN apt-get update && apt-get install -y \
+    curl build-essential ca-certificates \
+    vim git less locales iproute2 && \
     sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && \
     locale-gen
 ENV LANG=en_US.UTF-8
@@ -29,5 +29,5 @@ RUN echo '#!/bin/bash\nexport NVM_DIR="$HOME/.nvm"\n[ -s "$NVM_DIR/nvm.sh" ] && 
 ENV TERM=xterm-256color
 
 WORKDIR /sandbox
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/sbin/my_init", "--quiet", "--"]
 CMD ["tail", "-f", "/dev/null"]

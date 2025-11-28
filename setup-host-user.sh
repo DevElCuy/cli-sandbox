@@ -33,24 +33,29 @@ NODE_VERSION="v22" # Use the same version as in the Dockerfile previously
 # Check if nvm is already installed for the target user
 if [ ! -d "$NVM_DIR" ]; then
     echo "Installing nvm for user $TARGET_USER..."
-    su - "$TARGET_USER" -c "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash"
+    /sbin/setuser "$TARGET_USER" bash -l -c "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash"
     echo "nvm installed."
 fi
 
 # Install Node.js for the target user
 echo "Installing Node.js $NODE_VERSION for user $TARGET_USER..."
-su - "$TARGET_USER" -c "export NVM_DIR=\"$NVM_DIR\" && [ -s \"$NVM_DIR/nvm.sh\" ] && \\. \"$NVM_DIR/nvm.sh\" && nvm install $NODE_VERSION && nvm alias default $NODE_VERSION"
+/sbin/setuser "$TARGET_USER" bash -l -c "export NVM_DIR=\"$NVM_DIR\" && [ -s \"$NVM_DIR/nvm.sh\" ] && \\. \"$NVM_DIR/nvm.sh\" && nvm install $NODE_VERSION && nvm alias default $NODE_VERSION"
 echo "Node.js $NODE_VERSION installed and set as default."
 
-echo "$(ip route | awk '/default/ {print $3}') host.docker.internal" >> /etc/hosts
+# Add host.docker.internal to /etc/hosts if not already present
+GATEWAY_IP=$(ip route | awk '/default/ {print $3}')
+if ! grep -q "host.docker.internal" /etc/hosts; then
+    echo "$GATEWAY_IP host.docker.internal" >> /etc/hosts
+fi
 
-MARKER_DIR=/etc/cuybox
-MARKER_FILE=${MARKER_DIR}/user-${TARGET_UID}.marker
-
-mkdir -p "$MARKER_DIR"
-cat > "$MARKER_FILE" <<EOF
-uid=$TARGET_UID
-gid=$TARGET_GID
-generated=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-EOF
-chmod 600 "$MARKER_FILE"
+# Marker file creation - commented out (not used in control flow)
+# MARKER_DIR=/etc/cuybox
+# MARKER_FILE=${MARKER_DIR}/user-${TARGET_UID}.marker
+#
+# mkdir -p "$MARKER_DIR"
+# cat > "$MARKER_FILE" <<EOF
+# uid=$TARGET_UID
+# gid=$TARGET_GID
+# generated=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# EOF
+# chmod 600 "$MARKER_FILE"
