@@ -48,6 +48,22 @@ if ! grep -q "host.docker.internal" /etc/hosts; then
     echo "$GATEWAY_IP host.docker.internal" >> /etc/hosts
 fi
 
+# Source custom setup script if it exists
+if [ -f /sandbox/.cuyboxrc ]; then
+    echo "Running custom setup from .cuyboxrc..."
+    set +e  # Temporarily disable exit-on-error
+    source /sandbox/.cuyboxrc
+    CUYBOXRC_EXIT=$?
+    set -e  # Re-enable exit-on-error
+
+    if [ $CUYBOXRC_EXIT -ne 0 ]; then
+        echo "Warning: .cuyboxrc exited with code $CUYBOXRC_EXIT" >&2
+        echo "Container setup will continue, but custom setup may be incomplete." >&2
+    else
+        echo ".cuyboxrc completed successfully."
+    fi
+fi
+
 # Marker file creation - commented out (not used in control flow)
 # MARKER_DIR=/etc/cuybox
 # MARKER_FILE=${MARKER_DIR}/user-${TARGET_UID}.marker

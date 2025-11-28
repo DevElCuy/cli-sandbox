@@ -253,7 +253,28 @@ resolve_target_details() {
         error_exit "Error: directory '$ABSOLUTE_PATH' does not exist." 1
     fi
 
-    DEFAULT_TAG=$(basename "$ABSOLUTE_PATH" | tr '[:upper:]' '[:lower:]')
+    # Scan upward to find .cuyboxrc (cuybox project root)
+    CONTAINER_ROOT="$ABSOLUTE_PATH"
+    CUYBOXRC_FOUND=0
+    CURRENT="$ABSOLUTE_PATH"
+    while [ "$CURRENT" != "/" ]; do
+        if [ -f "$CURRENT/.cuyboxrc" ]; then
+            CONTAINER_ROOT="$CURRENT"
+            CUYBOXRC_FOUND=1
+            break
+        fi
+        CURRENT=$(dirname "$CURRENT")
+    done
+
+    # Calculate relative path from container root to target (for workdir)
+    if [ "$CONTAINER_ROOT" = "$ABSOLUTE_PATH" ]; then
+        WORKDIR_PATH="/sandbox"
+    else
+        REL_PATH="${ABSOLUTE_PATH#$CONTAINER_ROOT/}"
+        WORKDIR_PATH="/sandbox/$REL_PATH"
+    fi
+
+    DEFAULT_TAG=$(basename "$CONTAINER_ROOT" | tr '[:upper:]' '[:lower:]')
     CUSTOM_TAG=${SCRIPT_ARGS[1]:-}
     TAG=${CUSTOM_TAG:-$DEFAULT_TAG}
     if [ -n "$CUSTOM_TAG" ]; then
@@ -274,15 +295,15 @@ resolve_target_details() {
     HOST_UID=$(id -u)
     HOST_GID=$(id -g)
 
-    RAW_HASH=$(crc32 <(printf '%s' "$ABSOLUTE_PATH") 2>/dev/null | tr -d '\n' | tr '[:upper:]' '[:lower:]')
+    RAW_HASH=$(crc32 <(printf '%s' "$CONTAINER_ROOT") 2>/dev/null | tr -d '\n' | tr '[:upper:]' '[:lower:]')
     if [ -z "$RAW_HASH" ]; then
-        error_exit "Error: failed to generate CRC32 hash for '$ABSOLUTE_PATH'."
+        error_exit "Error: failed to generate CRC32 hash for '$CONTAINER_ROOT'."
     fi
     HASH=${RAW_HASH:0:4}
 }
 
 load_or_create_index() {
-    EXISTING_ENTRY=$(jq -r --arg path "$ABSOLUTE_PATH" '.[$path]' "$CONFIG_FILE")
+    EXISTING_ENTRY=$(jq -r --arg path "$CONTAINER_ROOT" '.[$path]' "$CONFIG_FILE")
 
     if [ "$EXISTING_ENTRY" != "null" ]; then
         INDEX=$(jq -r '.index // -1' <<< "$EXISTING_ENTRY")
@@ -327,17 +348,17 @@ refresh_container_name() {
 
 persist_container_metadata() {
     local container_id_value="${1:-}"
-    if ! jq --arg path "$ABSOLUTE_PATH" \
+    if ! jq --arg path "$CONTAINER_ROOT" \
              --arg hash "$HASH" \
              --argjson index "$INDEX" \
              --arg tag "$TAG" \
              --arg container_id "$container_id_value" \
              '.[$path] = {hash: $hash, index: $index, tag: $tag} + (if $container_id == "" then {} else {container_id: $container_id} end)' \
              "$CONFIG_FILE" > "$CONFIG_FILE.tmp"; then
-        error_exit "Error: failed to update sandbox state for '$ABSOLUTE_PATH'."
+        error_exit "Error: failed to update sandbox state for '$CONTAINER_ROOT'."
     fi
     if ! mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"; then
-        error_exit "Error: failed to persist sandbox state for '$ABSOLUTE_PATH'."
+        error_exit "Error: failed to persist sandbox state for '$CONTAINER_ROOT'."
     fi
 }
 
@@ -482,7 +503,12 @@ ensure_container_ready_for_forwarding() {
 run_forward_port_mode() {
     ensure_container_ready_for_forwarding
 
-    echo "Sandbox target: $ABSOLUTE_PATH"
+    if [ "$CONTAINER_ROOT" != "$ABSOLUTE_PATH" ]; then
+        echo "Container root: $CONTAINER_ROOT (via .cuyboxrc)"
+        echo "Working directory: $ABSOLUTE_PATH"
+    else
+        echo "Container root: $CONTAINER_ROOT"
+    fi
     if [ -n "$ACTUAL_CONTAINER_NAME" ]; then
         echo "Container name: $ACTUAL_CONTAINER_NAME"
     else
@@ -569,8 +595,8 @@ stage_setup() {
             --label cuybox.tag="$TAG" \
             --label cuybox.hash="$HASH" \
             --label cuybox.index="$INDEX" \
-            -v "$ABSOLUTE_PATH:/sandbox" \
-            -w /sandbox \
+            -v "$CONTAINER_ROOT:/sandbox" \
+            -w "$WORKDIR_PATH" \
             "$IMAGE_NAME"); then
             error_exit "Error: failed to create sandbox container."
         fi
@@ -594,6 +620,22 @@ stage_setup() {
         refresh_container_name
     fi
 
+    # Create .cuyboxrc template if it doesn't exist
+    if [ ! -f "$CONTAINER_ROOT/.cuyboxrc" ]; then
+        cat > "$CONTAINER_ROOT/.cuyboxrc" <<'EOF'
+#!/bin/bash
+# cuybox setup script - runs as root during container setup
+# Available: $TARGET_UID, $TARGET_GID, $TARGET_USER
+
+# Example: Install packages and setup as target user
+# apt-get update && apt-get install -y postgresql-client
+# /sbin/setuser "$TARGET_USER" bash -l -c "npm install -g typescript"
+
+EOF
+        chmod +x "$CONTAINER_ROOT/.cuyboxrc"
+        echo "Created .cuyboxrc template at $CONTAINER_ROOT/.cuyboxrc"
+    fi
+
     if [ "$container_created" -eq 1 ] || [ "$FORCE_USER_SETUP" -eq 1 ]; then
         echo "Running container setup for host user..."
         if ! docker exec \
@@ -613,7 +655,12 @@ stage_setup() {
 }
 
 stage_run() {
-    echo "Sandbox target: $ABSOLUTE_PATH"
+    if [ "$CONTAINER_ROOT" != "$ABSOLUTE_PATH" ]; then
+        echo "Container root: $CONTAINER_ROOT (via .cuyboxrc)"
+        echo "Working directory: $ABSOLUTE_PATH"
+    else
+        echo "Container root: $CONTAINER_ROOT"
+    fi
     refresh_container_name
     if [ -n "$ACTUAL_CONTAINER_NAME" ]; then
         echo "Container name: $ACTUAL_CONTAINER_NAME"
@@ -637,7 +684,7 @@ stage_run() {
     fi
 
     local prompt_hostname="${ACTUAL_CONTAINER_NAME:-$CONTAINER_NAME}"
-    local exec_args=(docker exec -it --user "$exec_user" --workdir /sandbox)
+    local exec_args=(docker exec -it --user "$exec_user" --workdir "$WORKDIR_PATH")
     if [ -n "$prompt_hostname" ]; then
         exec_args+=(--env CLI_SANDBOX_HOSTNAME="$prompt_hostname")
     fi
